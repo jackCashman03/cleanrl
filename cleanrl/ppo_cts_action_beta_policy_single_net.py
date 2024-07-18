@@ -13,7 +13,13 @@ import tyro
 from torch.distributions.beta import Beta
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn.functional import sigmoid
+import matplotlib.pyplot as plt
 
+A_MINS = []
+A_MAXS = []
+
+B_MINS = []
+B_MAXS = []
 
 @dataclass
 class Args:
@@ -75,6 +81,8 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
+    lb: float = 3.0
+    """lower bound for alpha and beta params"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -125,37 +133,29 @@ class Agent(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(64, 1), std=1.0),
         )
-        ## Was actor_mean
-        self.actor_alpha = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+
+        self.actor = nn.Sequential(
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 96)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
+            layer_init(nn.Linear(96, 128)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
-            nn.Softplus(),
-        )
-        # Is new
-        self.actor_beta = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
-            nn.Softplus(),
+            layer_init(nn.Linear(128, 2 * np.prod(envs.single_action_space.shape)), std=0.01),
+            nn.ReLU(),
         )
 
     def get_value(self, x):
         return self.critic(x)
 
-    def get_action_and_value(self, x, action=None):
-        action_alpha = self.actor_alpha(x) + 1
-        action_beta = self.actor_beta(x) + 1
-
+    def get_action_and_value(self, x, action=None, env=None):
+        nums_params = env.single_action_space.shape[0]
+        action_alpha = self.actor(x)[:, :nums_params] + args.lb
+        action_beta = self.actor(x)[:, nums_params:] + args.lb
         probs = Beta(action_alpha, action_beta)
 
         # Can map beta support onto [a_l, a_h] using f(x) = (a_h - a_l)x + a_l, which is a bijection
-        a_l = -1
-        a_h = 1
+
+        a_l = env.action_space.low[0][0]
+        a_h = env.action_space.high[0][0]
 
         if action is None:
             sample = probs.sample()
@@ -237,7 +237,7 @@ if __name__ == "__main__":
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                action, logprob, _, value = agent.get_action_and_value(next_obs, env=envs)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -289,7 +289,7 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds], env=envs)
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 

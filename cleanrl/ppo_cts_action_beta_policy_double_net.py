@@ -12,7 +12,14 @@ import torch.optim as optim
 import tyro
 from torch.distributions.beta import Beta
 from torch.utils.tensorboard import SummaryWriter
+from torch.nn.functional import sigmoid
+import matplotlib.pyplot as plt
 
+A_MINS = []
+A_MAXS = []
+
+B_MINS = []
+B_MAXS = []
 
 @dataclass
 class Args:
@@ -74,6 +81,8 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
+    lb: float = 3.0
+    """lower bound for alpha and beta params"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -124,41 +133,44 @@ class Agent(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(64, 1), std=1.0),
         )
-        ## NO TRANSFORMATION APPLIED TO NN OUTPUT
+
         self.actor_alpha = nn.Sequential(
             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
+            nn.ReLU(),
         )
-        # Is new
+
         self.actor_beta = nn.Sequential(
             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
+            nn.ReLU(),
         )
 
     def get_value(self, x):
         return self.critic(x)
 
-    def get_action_and_value(self, x, action=None):
-        action_alpha = torch.exp(self.actor_alpha(x)) + 1
-        action_beta = torch.exp(self.actor_beta(x)) + 1
-
+    def get_action_and_value(self, x, action=None, env=None):
+        action_alpha = self.actor_alpha(x) + args.lb
+        action_beta = self.actor_beta(x) + args.lb
         probs = Beta(action_alpha, action_beta)
 
         # Can map beta support onto [a_l, a_h] using f(x) = (a_h - a_l)x + a_l, which is a bijection
-        a_l = -1
-        a_h = 1
+
+        a_l = env.action_space.low[0][0]
+        a_h = env.action_space.high[0][0]
 
         if action is None:
             sample = probs.sample()
             action = (a_h - a_l) * sample + a_l
         else:
             sample = (action - a_l) / (a_h - a_l)
+
         return action, probs.log_prob(sample).sum(1), probs.entropy().sum(1), self.critic(x)
 
 
@@ -233,7 +245,7 @@ if __name__ == "__main__":
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                action, logprob, _, value = agent.get_action_and_value(next_obs, env=envs)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -268,7 +280,6 @@ if __name__ == "__main__":
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
 
-
         # flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
@@ -286,8 +297,7 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
-
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds], env=envs)
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -298,14 +308,12 @@ if __name__ == "__main__":
                     clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
 
                 mb_advantages = b_advantages[mb_inds]
-
                 if args.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
                 pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
@@ -325,10 +333,6 @@ if __name__ == "__main__":
 
                 entropy_loss = entropy.mean()
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-
-                # print(f'pg: {pg_loss.item()}')
-                # print(f'ent: {entropy_loss.item()}')
-                # print(f'v: {v_loss.item()}')
 
                 optimizer.zero_grad()
                 loss.backward()
