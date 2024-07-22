@@ -1,3 +1,11 @@
+"""
+The file is adapted from ppo_continuous_action.py in order for the policy to obey a beta distribution.
+A single network is used to output both the alpha and beta parameters.
+- Jack Cashman
+"""
+
+
+
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
 import os
 import random

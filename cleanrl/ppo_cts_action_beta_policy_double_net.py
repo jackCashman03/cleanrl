@@ -1,3 +1,10 @@
+"""
+The file is adapted from ppo_continuous_action.py in order for the policy to obey a beta distribution.
+1 network is used to predict the alpha parameters, and another is used for the beta parameters
+- Jack Cashman
+"""
+
+
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
 import os
 import random
